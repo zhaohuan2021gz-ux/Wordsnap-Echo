@@ -486,17 +486,34 @@ var STOP = new Set(['a','an','the','is','are','was','were','be','been','being','
 
 function tokenise(text) {
   var seen = {};
-  return text.toLowerCase()
+  // Split on whitespace and punctuation, keep words 2+ chars
+  var words = text.toLowerCase()
     .replace(/[^a-z\s]/g, ' ')
     .split(/\s+/)
     .map(function(w){ return w.trim(); })
     .filter(function(w){
-      if(w.length < 3 || STOP.has(w) || !/^[a-z]{3,}$/.test(w)) return false;
-      if(seen[w]) return false;
+      if(w.length < 2) return false;           // too short
+      if(!/^[a-z]+$/.test(w)) return false;    // letters only
+      if(STOP.has(w)) return false;            // skip stop words
+      if(seen[w]) return false;                // no duplicates
       seen[w] = true;
       return true;
-    })
-    .slice(0, 15);
+    });
+  // If strict filter gives too few words, fall back to all real words
+  if(words.length < 3) {
+    var seen2 = {};
+    words = text.toLowerCase()
+      .replace(/[^a-z\s]/g, ' ')
+      .split(/\s+/)
+      .map(function(w){ return w.trim(); })
+      .filter(function(w){
+        if(w.length < 2 || !/^[a-z]+$/.test(w)) return false;
+        if(seen2[w]) return false;
+        seen2[w] = true;
+        return true;
+      });
+  }
+  return words.slice(0, 20);
 }
 
 function showScreen(id) {
@@ -509,7 +526,27 @@ function showScreen(id) {
   if(id === 'screen-dash') refreshDash();
   if(id === 'screen-lib') renderLibrary();
   if(id === 'screen-quiz') refreshQuizSetup();
+  if(id === 'screen-scan') resetScanScreen();
   window.scrollTo(0,0);
+}
+
+function resetScanScreen() {
+  // Reset image
+  currentImageData = null;
+  var p = document.getElementById('imagePreview');
+  p.src = ''; p.style.display = 'none';
+  // Show upload zone again
+  var uz = document.getElementById('uploadZone');
+  uz.style.display = 'block';
+  // Reset file input so same photo can be re-selected
+  var inp = document.getElementById('imageInput');
+  inp.value = '';
+  // Reset text input
+  document.getElementById('textInput').value = '';
+  // Reset to photo tab
+  switchTab('photo');
+  // Reset filter
+  setFilter('all');
 }
 
 function refreshDash() {
