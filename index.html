@@ -504,7 +504,7 @@ async function lookupWord(word){
       var withText=phonetics.find(function(p){return p.text&&p.text.length>0;});
       card.ipa=(withText||withAudio||{}).text||'';
       card.audioUrl=withAudio?withAudio.audio:'';
-      if(card.audioUrl&&card.audioUrl.indexOf('//'===0))card.audioUrl='https:'+card.audioUrl;
+      if(card.audioUrl&&card.audioUrl.indexOf('https')!==0)card.audioUrl='https:'+card.audioUrl.replace(/^\/\//,'');
       if(card.audioUrl&&card.audioUrl.startsWith('//'))card.audioUrl='https:'+card.audioUrl;
       var defs=((entry.meanings||[])[0]||{}).definitions||[];
       card.meaning=(defs[0]||{}).definition||'';
@@ -551,7 +551,7 @@ function buildCards(cards){
     var sk=encodeURIComponent(key);
     var hasAudio=d.audioUrl&&d.audioUrl.length>0;
     var playHtml=hasAudio
-      ?'<button class="play-btn" onclick="event.stopPropagation();playAudio('+encodeURIComponent(d.audioUrl)+',this)">&#9654; Play</button>'
+      ?'<button class="play-btn" onclick="event.stopPropagation();playAudio('+encodeURIComponent(d.audioUrl)+',this,&quot;'+esc(d.word)+'&quot;)">&#9654; Play</button>'
       :'<button class="play-btn" onclick="event.stopPropagation();speakText('+esc(d.word)+',this)">&#128266; Speak</button>';
     var phHtml=d.phonetic?'<span class="card-phonetic">'+esc(d.phonetic)+'</span>':'';
     return'<div class="flashcard '+st+'" id="fc-'+sk+'" style="animation-delay:'+(i*.06)+'s">'
@@ -657,19 +657,25 @@ function modalMark(status){
 function playWordModal(){
   if(!modalKey||!db[modalKey])return;
   var d=db[modalKey],btn=document.getElementById('mPlayBtn');
-  if(d.audioUrl)playAudio(encodeURIComponent(d.audioUrl),btn);
+  if(d.audioUrl)playAudio(encodeURIComponent(d.audioUrl),btn,d.word);
   else speakText(d.word,btn);
 }
 
-function playAudio(encUrl,btn){
+function playAudio(encUrl,btn,word){
   var url=decodeURIComponent(encUrl);
+  if(!url){if(word)speakText(word,btn);return;}
   try{
     var audio=new Audio(url);
     if(btn)btn.classList.add('playing');
     audio.onended=function(){if(btn)btn.classList.remove('playing');};
-    audio.onerror=function(){if(btn)btn.classList.remove('playing');};
-    audio.play();
-  }catch(e){}
+    audio.onerror=function(){
+      if(btn)btn.classList.remove('playing');
+      // Fall back to speech synthesis if audio file fails
+      if(word)speakText(word,btn);
+    };
+    var p=audio.play();
+    if(p&&p.catch)p.catch(function(){if(word)speakText(word,btn);});
+  }catch(e){if(word)speakText(word,btn);}
 }
 
 function speakText(text,btn){
