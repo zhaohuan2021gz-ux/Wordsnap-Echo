@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>WordSnap</title>
 <script src="https://unpkg.com/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
 <style>
@@ -187,7 +190,7 @@ body{font-family:'Nunito',sans-serif;background:var(--bg);color:var(--text);min-
 <div class="screen active" id="screen-dash">
   <div class="top-bar"><h1>Word<span>Snap</span></h1><div class="top-bar-right">EN&#8594;&#20013;&#25991;</div></div>
   <div class="dash-scroll">
-    <div class="dash-hero"><h2>&#20320;&#22909; Hello! &#128075;</h2><p>Snap a photo or type English &#8212; 100% free, no sign-in needed</p></div>
+    <div class="dash-hero"><h2>&#20320;&#22909; Hello! &#128075;</h2><p>Snap a photo or type English &#8212; 100% free, no sign-in needed</p><p style="font-size:10px;opacity:.5;margin-top:4px">v1.5</p></div>
     <div class="stats-row">
       <div class="stat-card known" onclick="showScreen('screen-lib');setLibTab('known')">
         <div class="stat-top"><div class="stat-icon">&#9989;</div><div class="stat-badge">KNOWN</div></div>
@@ -455,22 +458,52 @@ async function startProcessing(){
       var kw2=Object.values(db).filter(function(w){return w.status==='known';}).map(function(w){return w.word.toLowerCase();});
       candidates=candidates.filter(function(w){return kw2.indexOf(w)!==-1;});
     }
-    if(!candidates.length){showToast('No words found. Try the All filter.');showScreen('screen-scan');return;}
+    if(!candidates.length){
+      // Last resort: just split on spaces and take any 3+ letter sequences
+      var fallback={};
+      candidates = rawText.toLowerCase().replace(/[^a-z\s]/g,' ').split(/\s+/)
+        .filter(function(w){ return w.length>=3&&!fallback[w]&&(fallback[w]=true); })
+        .slice(0,20);
+      if(!candidates.length){
+        showToast('No English words found. Please type English text.');
+        showScreen('screen-scan');return;
+      }
+    }
 
-    setProgress(30,'\uD83D\uDCDA','Looking up words...','Checking '+candidates.length+' words...');
+    setProgress(30,'\uD83D\uDCDA','Looking up words...',
+      'Found: '+candidates.join(', ').substring(0,60)+'...');
+    await new Promise(function(r){setTimeout(r,1500);});  // show user what was found
+    var isPhoto=(currentTab==='photo');
     var cards=[];
     for(var i=0;i<candidates.length;i++){
       document.getElementById('progWord').textContent=candidates[i];
       setProgress(30+Math.round((i/candidates.length)*65),'\uD83D\uDCDA','Looking up words...',(i+1)+' of '+candidates.length);
-      var card=await lookupWord(candidates[i]);
-      if(card){
-        var existing=db[candidates[i]];
-        card.status=existing?existing.status:'new';
-        db[candidates[i]]=card;cards.push(card);
+      try{
+        var card=await lookupWord(candidates[i],isPhoto);
+        if(card){
+          var existing=db[candidates[i]];
+          card.status=existing?existing.status:'new';
+          db[candidates[i]]=card;cards.push(card);
+        } else if(!isPhoto){
+          // Text mode: always create a basic card even if lookup failed
+          var fallbackCard={word:candidates[i],ipa:'',phonetic:'',audioUrl:'',chinese:'',meaning:'',exEn:'',exZh:'',status:'new'};
+          var existing2=db[candidates[i]];
+          fallbackCard.status=existing2?existing2.status:'new';
+          db[candidates[i]]=fallbackCard;cards.push(fallbackCard);
+        }
+      }catch(e){
+        console.error('Error looking up',candidates[i],e);
+        if(!isPhoto){
+          var errCard={word:candidates[i],ipa:'',phonetic:'',audioUrl:'',chinese:'',meaning:'',exEn:'',exZh:'',status:'new'};
+          db[candidates[i]]=errCard;cards.push(errCard);
+        }
       }
     }
     saveDb();
-    if(!cards.length){showToast('No valid words found. Text may be unclear.');showScreen('screen-scan');return;}
+    if(!cards.length){
+      showToast('0 cards created from '+candidates.length+' words found');
+      showScreen('screen-scan');return;
+    }
     setProgress(100,'\uD83C\uDF89','Done!','Found '+cards.length+' words');
     currentResultKeys=cards.map(function(c){return c.word.toLowerCase();});
     await new Promise(function(r){setTimeout(r,600);});
@@ -487,12 +520,22 @@ async function ocrImage(imageData){
       else if(m.status==='loading tesseract core'||m.status==='loading language traineddata')setProgress(6,'\u23F3','Loading OCR...','Downloading (first time only)...');
     }
   });
-  return result.data.text;
+  // Use word-level data with confidence scores instead of raw text
+  // Only keep words Tesseract is confident about (confidence > 70)
+  var words = result.data.words || [];
+  var highConfWords = words
+    .filter(function(w){ return w.confidence > 70 && w.text && w.text.length >= 3; })
+    .map(function(w){ return w.text; })
+    .join(' ');
+  // Fall back to full text if confidence filtering gives too little
+  return highConfWords.length > 5 ? highConfWords : result.data.text;
 }
 
-async function lookupWord(word){
+async function lookupWord(word,requireDict){
   var card={word:word,ipa:'',phonetic:'',audioUrl:'',chinese:'',meaning:'',exEn:'',exZh:'',status:'new'};
   var foundInDict=false;
+
+  // Step 1: Dictionary lookup (IPA + definition + example)
   try{
     var res=await fetch('https://api.dictionaryapi.dev/api/v2/entries/en/'+encodeURIComponent(word));
     if(res.ok){
@@ -500,24 +543,35 @@ async function lookupWord(word){
       var entry=data[0];
       foundInDict=true;
       var phonetics=entry.phonetics||[];
-      var withAudio=phonetics.find(function(p){return p.audio&&p.audio.length>0;});
       var withText=phonetics.find(function(p){return p.text&&p.text.length>0;});
-      card.ipa=(withText||withAudio||{}).text||'';
-      card.audioUrl=withAudio?withAudio.audio:'';
-      if(card.audioUrl&&card.audioUrl.indexOf('https')!==0)card.audioUrl='https:'+card.audioUrl.replace(/^\/\//,'');
-      if(card.audioUrl&&card.audioUrl.startsWith('//'))card.audioUrl='https:'+card.audioUrl;
+      card.ipa=(withText||phonetics[0]||{}).text||'';
       var defs=((entry.meanings||[])[0]||{}).definitions||[];
       card.meaning=(defs[0]||{}).definition||'';
       card.exEn=(defs[0]||{}).example||'';
       if(card.ipa)card.phonetic=ipaToPhonetic(card.ipa);
     }
   }catch(e){}
-  // Only keep words found in the dictionary — this filters out OCR fragments like "pr","bl","ool"
-  if(!foundInDict)return null;
-  try{card.chinese=await translate(word);}catch(e){}
-  if(card.exEn){try{card.exZh=await translate(card.exEn);}catch(e){}}
+
+  // For photo scans: drop words not in dictionary (filters OCR noise like "pr","tr","bl")
+  if(!foundInDict&&requireDict)return null;
+
+  // Step 2: Translate word to Chinese
+  try{
+    var t=await translate(word);
+    card.chinese=t||(foundInDict?'':word);
+  }catch(e){card.chinese='';}
+
+  // Step 3: Translate example sentence
+  if(card.exEn){
+    try{card.exZh=await translate(card.exEn);}catch(e){}
+  }
+
+  // For typed text (requireDict=false): ALWAYS return card
+  // For photos: drop if nothing useful found
+  if(requireDict&&!card.chinese&&!card.meaning&&!card.ipa)return null;
   return card;
 }
+
 
 async function translate(text){
   var res=await fetch('https://api.mymemory.translated.net/get?q='+encodeURIComponent(text)+'&langpair=en|zh-CN');
@@ -549,10 +603,7 @@ function buildCards(cards){
     var d=db[key]||c;
     var st=d.status||'new';
     var sk=encodeURIComponent(key);
-    var hasAudio=d.audioUrl&&d.audioUrl.length>0;
-    var playHtml=hasAudio
-      ?'<button class="play-btn" onclick="event.stopPropagation();playAudio('+encodeURIComponent(d.audioUrl)+',this,&quot;'+esc(d.word)+'&quot;)">&#9654; Play</button>'
-      :'<button class="play-btn" onclick="event.stopPropagation();speakText('+esc(d.word)+',this)">&#128266; Speak</button>';
+    var playHtml='<button class="play-btn" onclick="event.stopPropagation();speakText(&#39;'+esc(d.word)+'&#39;,this)">&#128266; Listen</button>';
     var phHtml=d.phonetic?'<span class="card-phonetic">'+esc(d.phonetic)+'</span>':'';
     return'<div class="flashcard '+st+'" id="fc-'+sk+'" style="animation-delay:'+(i*.06)+'s">'
       +'<div class="card-main" onclick="openModal('+sk+'")>'
@@ -657,8 +708,7 @@ function modalMark(status){
 function playWordModal(){
   if(!modalKey||!db[modalKey])return;
   var d=db[modalKey],btn=document.getElementById('mPlayBtn');
-  if(d.audioUrl)playAudio(encodeURIComponent(d.audioUrl),btn,d.word);
-  else speakText(d.word,btn);
+  speakText(d.word,btn);
 }
 
 function playAudio(encUrl,btn,word){
@@ -679,18 +729,28 @@ function playAudio(encUrl,btn,word){
 }
 
 function speakText(text,btn){
-  if(!window.speechSynthesis)return;
+  if(!window.speechSynthesis){showToast('Speech not supported on this browser');return;}
   window.speechSynthesis.cancel();
-  var utt=new SpeechSynthesisUtterance(text);
-  utt.lang='en-GB';utt.rate=0.85;
-  var voices=window.speechSynthesis.getVoices();
-  var v=voices.find(function(v){return v.lang.startsWith('en-GB');})||voices.find(function(v){return v.lang.startsWith('en-');});
-  if(v)utt.voice=v;
-  if(btn)btn.classList.add('playing');
-  utt.onend=function(){if(btn)btn.classList.remove('playing');};
-  window.speechSynthesis.speak(utt);
+  // Small delay needed on iOS Safari
+  setTimeout(function(){
+    var utt=new SpeechSynthesisUtterance(text);
+    utt.lang='en-GB';utt.rate=0.85;utt.pitch=1;utt.volume=1;
+    var voices=window.speechSynthesis.getVoices();
+    var v=voices.find(function(v){return v.lang==='en-GB';})||
+          voices.find(function(v){return v.lang.startsWith('en-GB');})||
+          voices.find(function(v){return v.lang.startsWith('en-US');})||
+          voices.find(function(v){return v.lang.startsWith('en');});
+    if(v)utt.voice=v;
+    if(btn)btn.classList.add('playing');
+    utt.onend=function(){if(btn)btn.classList.remove('playing');};
+    utt.onerror=function(){if(btn)btn.classList.remove('playing');showToast('Could not play audio');};
+    window.speechSynthesis.speak(utt);
+  },100);
 }
-if(window.speechSynthesis){window.speechSynthesis.getVoices();window.speechSynthesis.onvoiceschanged=function(){window.speechSynthesis.getVoices();};}
+if(window.speechSynthesis){
+  window.speechSynthesis.getVoices();
+  window.speechSynthesis.onvoiceschanged=function(){window.speechSynthesis.getVoices();};
+}
 
 function setQuizMode(m){
   quizMode=m;
